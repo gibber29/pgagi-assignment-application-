@@ -69,19 +69,55 @@ Keep it clear and appropriate for a technical interview.
     return _call_gemini(prompt)
 
 
-def evaluate_answer_text(answer: str) -> Dict:
+def evaluate_answer_text(question: str, current_answer: str, previous_attempts: List[str] = None) -> Dict:
+    history_text = "\n".join([f"Attempt {i+1}: {a}" for i, a in enumerate(previous_attempts)]) if previous_attempts else "None"
+    
     prompt = f"""
-Evaluate this interview answer: "{answer}"
+    Context:
+    Question asked: "{question}"
+    Previous attempts (if any):
+    {history_text}
+    
+    Current attempt to evaluate: "{current_answer}"
 
-Classify as: weak, medium, or strong.
-Provide concise feedback and a suggested difficulty adjustment: increase, maintain, or decrease.
-Respond in valid JSON only.
-"""
+    Evaluate if the candidate has sufficiently answered the question based on all their attempts.
+    
+    Guidelines:
+    1. "classification": Classify the cumulative answer as "weak", "medium", or "strong".
+    2. "feedback": Provide specific, technical feedback. If they are missing something, explain exactly what concept is missing. If they are moving on, summarize what they did well and what they could have added.
+    3. "advance": A boolean. Set to true if the candidate has given a "strong" answer OR if they have had 2+ attempts and further follow-up is unlikely to yield more depth.
+    4. "topic": 2-3 word summary of the concept.
+    5. "adjustment": "increase", "maintain", or "decrease" difficulty for the next question.
+
+    Respond in valid JSON format:
+    {{
+        "classification": "...",
+        "feedback": "...",
+        "advance": true/false,
+        "topic": "...",
+        "adjustment": "..."
+    }}
+    """
 
     raw = _call_gemini(prompt)
-    parsed = json.loads(raw)
-    return {
-        "classification": parsed.get("classification", "medium"),
-        "feedback": parsed.get("feedback", "Thank you for your response."),
-        "adjustment": parsed.get("adjustment", "maintain"),
-    }
+    match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if match:
+        raw = match.group(0)
+    
+    try:
+        parsed = json.loads(raw)
+        return {
+            "classification": parsed.get("classification", "medium"),
+            "feedback": parsed.get("feedback", "Thank you for your response."),
+            "advance": bool(parsed.get("advance", False)),
+            "topic": parsed.get("topic", "Technical Concept"),
+            "adjustment": parsed.get("adjustment", "maintain"),
+        }
+    except Exception:
+        return {
+            "classification": "medium",
+            "feedback": "Thank you for your response.",
+            "advance": True,
+            "topic": "Technical Concept",
+            "adjustment": "maintain",
+        }

@@ -197,79 +197,6 @@ def get_next_message(session_id: str) -> str:
     raise ValueError(f"Unsupported session status: {status}")
 
 
-def _covered_expectations(answer: str, expectations: List) -> List[str]:
-    normalized = answer.lower()
-    covered = []
-    for label, keywords in expectations:
-        if any(keyword in normalized for keyword in keywords):
-            covered.append(label)
-    return covered
-
-
-def _summarize(items: List[str], fallback: str) -> str:
-    if not items:
-        return fallback
-    if len(items) == 1:
-        return items[0]
-    return f"{', '.join(items[:-1])}, and {items[-1]}"
-
-
-def _build_follow_up(answer: str, role: str, attempt: int, expectations: List) -> Dict[str, Any]:
-    covered = _covered_expectations(answer, expectations)
-    missing = [label for label, _ in expectations if label not in covered]
-    word_count = len(answer.split())
-
-    # Lenient scoring: a concrete, reasonably detailed answer can pass even if
-    # it does not use every expected keyword.
-    if len(covered) >= 4 or (word_count >= 90 and len(covered) >= 3):
-        classification = "strong"
-    elif len(covered) >= 2 or word_count >= 45:
-        classification = "medium"
-    else:
-        classification = "weak"
-
-    if attempt == 1:
-        focus = missing[:2] if missing else ["trade-offs", "how you would validate success"]
-        feedback = (
-            f"Good start. You covered {_summarize(covered, 'the high-level approach')}. "
-            f"Can you go a level deeper on {_summarize(focus, 'the implementation details')}?"
-        )
-        return {
-            "classification": classification,
-            "feedback": feedback,
-            "adjustment": "maintain",
-            "advance": False,
-        }
-
-    should_advance = classification == "strong" or attempt >= 3
-    if not should_advance:
-        focus = missing[:2] if missing else ["one concrete trade-off", "one metric you would track"]
-        feedback = (
-            f"That is moving in the right direction. Before we move on, add specifics on "
-            f"{_summarize(focus, 'the remaining gaps')}."
-        )
-        return {
-            "classification": classification,
-            "feedback": feedback,
-            "adjustment": "maintain",
-            "advance": False,
-        }
-
-    if missing:
-        feedback = (
-            f"Thanks, that is enough to move on. The main missing pieces were "
-            f"{_summarize(missing[:3], 'some implementation detail')}; in a real {role} answer, "
-            "I would expect you to name those explicitly and connect them to the outcome."
-        )
-    else:
-        feedback = "Strong answer. You covered the important parts clearly, so let us move to the next scenario."
-
-    return {
-        "classification": classification,
-        "feedback": feedback,
-        "adjustment": "maintain",
-        "advance": True,
-    }
 
 
 def evaluate_answer(session_id: str, answer: str) -> Dict[str, Any]:
@@ -280,20 +207,24 @@ def evaluate_answer(session_id: str, answer: str) -> Dict[str, Any]:
 
     role = session.get("role") or "Backend Engineer"
     expectations = session.get("current_expected_points") or ROLE_EXPECTATIONS.get(role, ROLE_EXPECTATIONS["Backend Engineer"])
-    combined_answer = "\n".join(session.get("current_answers", []))
+    previous_attempts = session.get("current_answers", [])[:-1] # All except the current one
 
     try:
-        evaluation = evaluate_answer_text(answer)
-    except Exception:
-        evaluation = {}
+        evaluation = evaluate_answer_text(
+            session.get("last_question", ""), 
+            answer, 
+            previous_attempts
+        )
+    except Exception as e:
+        print(f"Evaluation error: {e}")
+        evaluation = {
+            "classification": "medium",
+            "feedback": "Thank you for your answer. Let's move to the next question.",
+            "advance": True,
+            "topic": "Technical Concept",
+            "adjustment": "maintain"
+        }
 
-    interview_evaluation = _build_follow_up(
-        combined_answer,
-        role,
-        session["current_attempts"],
-        expectations,
-    )
-    evaluation.update(interview_evaluation)
     feedback = evaluation.get("feedback", "Thank you for your answer.")
     session["history"].append({"role": "agent", "text": feedback})
 
@@ -304,8 +235,14 @@ def evaluate_answer(session_id: str, answer: str) -> Dict[str, Any]:
     else:
         session["difficulty"] = "maintain depth"
 
-    covered = _covered_expectations(combined_answer, expectations)
-    missing = [label for label, _ in expectations if label not in covered]
+    # We use a simple keyword check just for the DB stats, but the LLM provides the real feedback
+    covered = []
+    missing = []
+    for label, keywords in expectations:
+        if any(k.lower() in answer.lower() for k in keywords):
+            covered.append(label)
+        else:
+            missing.append(label)
     with get_db_session() as db:
         db_session = db.get(InterviewSession, session_id)
         if db_session:

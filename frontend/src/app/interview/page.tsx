@@ -16,6 +16,7 @@ type Message = {
 type AssessmentMetrics = {
   conceptualUnderstanding: number;
   communicationClarity: number;
+  scoreHistory: { conceptual: number; communication: number }[];
 };
 
 type ParsedResume = {
@@ -70,8 +71,11 @@ export default function Interview() {
   const [metrics, setMetrics] = useState<AssessmentMetrics>({
     conceptualUnderstanding: 0,
     communicationClarity: 0,
+    scoreHistory: [],
   });
   const [candidateName] = useState("Alex Chen");
+  const [strengths, setStrengths] = useState<string[]>([]);
+  const [weaknesses, setWeaknesses] = useState<string[]>([]);
 
   useEffect(() => {
     startSession();
@@ -79,6 +83,28 @@ export default function Interview() {
 
   const appendMessage = (message: Message) => {
     setMessages((current) => [...current, message]);
+  };
+
+  const streamMessage = async (fullText: string) => {
+    // Add an empty agent message first
+    const messageId = Date.now();
+    setMessages((current) => [...current, { sender: "agent", text: "", timestamp: messageId.toString() }]);
+
+    let displayedText = "";
+    const words = fullText.split(" ");
+    
+    for (const word of words) {
+      displayedText += (displayedText ? " " : "") + word;
+      setMessages((current) => {
+        const last = current[current.length - 1];
+        if (last && last.sender === "agent" && last.timestamp === messageId.toString()) {
+          return [...current.slice(0, -1), { ...last, text: displayedText }];
+        }
+        return current;
+      });
+      // Small delay for "streaming" effect
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
   };
 
   const formatScore = (score?: number) =>
@@ -166,10 +192,7 @@ export default function Interview() {
       body: JSON.stringify({ session_id: sessionId, role: selectedRole }),
     });
 
-    appendMessage({
-      sender: "agent",
-      text: "Great! I am preparing your first technical question now.",
-    });
+    await streamMessage("Great! I am preparing your first technical question now.");
     setStep("answer");
     await fetchNextQuestion();
     setLoading(false);
@@ -188,7 +211,7 @@ export default function Interview() {
         throw new Error(data?.detail ?? `Question API error: ${response.status}`);
       }
       setRetrieval(data.retrieval ?? {});
-      appendMessage({ sender: "agent", text: data.question });
+      await streamMessage(data.question);
       setQuestionCount((current) => current + 1);
       setStep("answer");
     } catch (error) {
@@ -201,49 +224,59 @@ export default function Interview() {
   };
 
   const submitAnswer = async () => {
-    if (!answer.trim() || !sessionId) return;
+    const currentAnswer = answer.trim();
+    if (!currentAnswer || !sessionId) return;
+    
     setLoading(true);
-    appendMessage({ sender: "user", text: answer });
+    setAnswer(""); // Clear textbox immediately
+    appendMessage({ sender: "user", text: currentAnswer });
 
     try {
       const response = await fetch(apiUrl("/api/interview/answer"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, answer }),
+        body: JSON.stringify({ session_id: sessionId, answer: currentAnswer }),
       });
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data?.detail ?? `Answer API error: ${response.status}`);
       }
 
-      appendMessage({
-        sender: "agent",
-        text: data.feedback,
-      });
+      await streamMessage(data.feedback);
 
       if (data.next_question) {
         if (data.next_retrieval) {
           setRetrieval(data.next_retrieval);
         }
-        appendMessage({
-          sender: "agent",
-          text: data.next_question,
-        });
+        await streamMessage(data.next_question);
         setQuestionCount((current) => current + 1);
       }
 
-      setMetrics((prev) => ({
-        conceptualUnderstanding: Math.min(
-          100,
-          prev.conceptualUnderstanding + (data.classification === "strong" ? 8 : 3)
-        ),
-        communicationClarity: Math.min(
-          100,
-          prev.communicationClarity + (answer.length > 200 ? 6 : 2)
-        ),
-      }));
+      // Calculate scores for this specific answer
+      const conceptualScore = data.classification === "strong" ? 95 : data.classification === "medium" ? 75 : 40;
+      const wordCount = currentAnswer.split(/\s+/).length;
+      const communicationScore = wordCount > 100 ? 95 : wordCount > 40 ? 80 : 60;
 
-      setAnswer("");
+      setMetrics((prev) => {
+        const newHistory = [...prev.scoreHistory, { conceptual: conceptualScore, communication: communicationScore }];
+        const avgConceptual = Math.round(newHistory.reduce((sum, h) => sum + h.conceptual, 0) / newHistory.length);
+        const avgCommunication = Math.round(newHistory.reduce((sum, h) => sum + h.communication, 0) / newHistory.length);
+        
+        return {
+          scoreHistory: newHistory,
+          conceptualUnderstanding: avgConceptual,
+          communicationClarity: avgCommunication,
+        };
+      });
+
+      // Update strengths and weaknesses
+      const topic = data.topic || "Technical Concept";
+      if (data.classification === "strong") {
+        setStrengths((prev) => Array.from(new Set([...prev, topic])));
+      } else if (data.classification === "weak") {
+        setWeaknesses((prev) => Array.from(new Set([...prev, topic])));
+      }
+
     } catch (error) {
       console.error(error);
       appendMessage({
@@ -288,28 +321,45 @@ export default function Interview() {
       <aside className="w-64 bg-[#1c1b1b] border-r border-[#43474c] flex flex-col p-6 gap-6">
         <div className="flex items-center gap-3 mb-4">
           <div className="w-8 h-8 rounded-lg bg-[#b8c8da] flex items-center justify-center">
-            <span className="text-[#0d1d2a] text-sm">⚙️</span>
+            <span className="text-[#0d1d2a] text-lg">⚙️</span>
           </div>
           <div>
-            <h3 className="text-[#b8c8da] font-bold text-sm">Interview Context</h3>
-            <p className="text-xs text-[#8e9196]">Technical Screening Phase</p>
+            <h3 className="text-[#b8c8da] font-bold text-lg">Interview Context</h3>
+            <p className="text-base text-[#8e9196]">Technical Screening Phase</p>
           </div>
         </div>
 
-        <nav className="flex flex-col gap-2 flex-1">
-          <div className="flex items-center gap-3 px-4 py-2 text-[#c4c7cc] hover:text-[#e5e2e1] hover:bg-[#2a2a2a] rounded-lg cursor-pointer transition-all">
-            <span>📋</span>
-            <span className="text-xs font-medium">Screening Notes</span>
+        <div className="flex flex-col gap-4">
+          <h3 className="text-sm font-bold text-[#b8c8da] uppercase tracking-widest px-4">Screening Notes</h3>
+          
+          <div className="px-4 space-y-4">
+            <div>
+              <p className="text-xs font-bold text-green-500 mb-2">Strengths</p>
+              {strengths.length > 0 ? (
+                <ul className="text-sm text-[#c4c7cc] list-disc list-inside space-y-1">
+                  {strengths.map((s, i) => <li key={i}>{s}</li>)}
+                </ul>
+              ) : (
+                <p className="text-xs text-[#8e9196] italic">No strengths identified yet.</p>
+              )}
+            </div>
+
+            <div>
+              <p className="text-xs font-bold text-red-400 mb-2">Weaknesses</p>
+              {weaknesses.length > 0 ? (
+                <ul className="text-sm text-[#c4c7cc] list-disc list-inside space-y-1">
+                  {weaknesses.map((w, i) => <li key={i}>{w}</li>)}
+                </ul>
+              ) : (
+                <p className="text-xs text-[#8e9196] italic">No weaknesses identified yet.</p>
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-3 px-4 py-2 text-[#c4c7cc] hover:text-[#e5e2e1] hover:bg-[#2a2a2a] rounded-lg cursor-pointer transition-all">
-            <span>💻</span>
-            <span className="text-xs font-medium">Coding Environment</span>
-          </div>
-        </nav>
+        </div>
 
         <div className="mt-auto pt-6 border-t border-[#43474c]">
           <button className="w-full flex items-center justify-center gap-2 bg-[#474746] text-[#b7b5b4] py-2 rounded-lg hover:brightness-110 transition-all">
-            <span className="text-xs font-medium">View Scorecard</span>
+            <span className="text-base font-medium">View Scorecard</span>
             <span>↗</span>
           </button>
         </div>
@@ -320,8 +370,8 @@ export default function Interview() {
         {/* Header */}
         <header className="px-8 py-4 border-b border-[#43474c] flex justify-between items-center bg-[#131313]/50 backdrop-blur-md">
           <div>
-            <h2 className="text-[#e5e2e1] font-bold text-lg">{role || "Select a Role"}</h2>
-            <p className="text-xs text-[#8e9196] flex items-center gap-2">
+            <h2 className="text-[#e5e2e1] font-bold text-2xl">{role || "Select a Role"}</h2>
+            <p className="text-base text-[#8e9196] flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-[#b8c8da]"></span>
               {questionCount ? `Question ${questionCount} in progress` : "Assessment in progress..."}
             </p>
@@ -329,10 +379,10 @@ export default function Interview() {
           <div className="flex gap-2">
             {role && (
               <>
-                <span className="text-xs px-2 py-1 bg-[#2a2a2a] rounded border border-[#43474c] text-[#c4c7cc]">
+                <span className="text-base px-2 py-1 bg-[#2a2a2a] rounded border border-[#43474c] text-[#c4c7cc]">
                   Senior Level
                 </span>
-                <span className="text-xs px-2 py-1 bg-[#2a2a2a] rounded border border-[#43474c] text-[#c4c7cc]">
+                <span className="text-base px-2 py-1 bg-[#2a2a2a] rounded border border-[#43474c] text-[#c4c7cc]">
                   {role.split(" ")[0]}
                 </span>
               </>
@@ -353,7 +403,7 @@ export default function Interview() {
                 }`}
               >
                 <div
-                  className={`w-6 h-6 rounded flex-shrink-0 flex items-center justify-center text-xs ${
+                  className={`w-6 h-6 rounded flex-shrink-0 flex items-center justify-center text-base ${
                     msg.sender === "agent"
                       ? "bg-[#b8c8da] text-[#0d1d2a]"
                       : "bg-[#c8c6c5] text-[#1b1b1c]"
@@ -368,7 +418,7 @@ export default function Interview() {
                       : "bg-[#2a2a2a] border border-[#43474c]"
                   }`}
                 >
-                  <p className="text-[#e5e2e1] text-sm leading-relaxed">{msg.text}</p>
+                  <p className="text-[#e5e2e1] text-lg leading-relaxed">{msg.text}</p>
                 </div>
               </div>
             </div>
@@ -384,12 +434,12 @@ export default function Interview() {
                   type="file"
                   accept=".pdf"
                   onChange={(e) => setFile(e.target.files?.[0] || null)}
-                  className="flex-1 px-4 py-2 bg-[#1c1b1b] border border-[#43474c] rounded-lg text-[#e5e2e1] text-sm file:hidden"
+                  className="flex-1 px-4 py-2 bg-[#1c1b1b] border border-[#43474c] rounded-lg text-[#e5e2e1] text-lg file:hidden"
                 />
                 <Button
                   onClick={handleUpload}
                   disabled={!file || loading}
-                  className={`px-6 py-2 text-sm font-bold rounded-lg transition-all ${
+                  className={`px-6 py-2 text-lg font-bold rounded-lg transition-all ${
                     loading
                       ? "bg-[#b8c8da]/80 text-[#0d1d2a] cursor-wait"
                       : "bg-[#b8c8da] text-[#0d1d2a] hover:brightness-110"
@@ -404,7 +454,7 @@ export default function Interview() {
             ) : step === "select-role" ? (
               <div className="flex-1 grid gap-4">
                 {parsedResume && (
-                  <div className="grid grid-cols-2 gap-3 text-xs text-[#c4c7cc]">
+                  <div className="grid grid-cols-2 gap-3 text-base text-[#c4c7cc]">
                     <div className="bg-[#1c1b1b] border border-[#43474c] rounded-lg p-3">
                       <p className="mb-2 font-bold text-[#b8c8da]">Skills</p>
                       <p>{(parsedResume.skills ?? []).join(", ") || "No skills detected"}</p>
@@ -421,7 +471,7 @@ export default function Interview() {
                       key={r}
                       onClick={() => handleRoleSelection(r)}
                       disabled={loading}
-                      className="bg-[#2a2a2a] text-[#e5e2e1] hover:bg-[#43474c] border border-[#43474c] py-2 text-sm rounded-lg transition-all"
+                      className="bg-[#2a2a2a] text-[#e5e2e1] hover:bg-[#43474c] border border-[#43474c] py-2 text-lg rounded-lg transition-all"
                     >
                       {r}
                     </Button>
@@ -429,7 +479,7 @@ export default function Interview() {
                 </div>
               </div>
             ) : step === "summary" && summary ? (
-              <div className="flex-1 bg-[#1c1b1b] border border-[#43474c] rounded-xl p-4 text-sm text-[#e5e2e1]">
+              <div className="flex-1 bg-[#1c1b1b] border border-[#43474c] rounded-xl p-4 text-lg text-[#e5e2e1]">
                 <p className="font-bold text-[#b8c8da] mb-2">{summary.verdict}</p>
                 <p>{summary.summary}</p>
               </div>
@@ -439,32 +489,23 @@ export default function Interview() {
                   value={answer}
                   onChange={(e) => setAnswer(e.target.value)}
                   placeholder="Type your technical response here..."
-                  className="w-full bg-transparent border-none focus:ring-0 text-[#e5e2e1] text-sm resize-none px-4 py-3 placeholder-[#8e9196]/50"
+                  className="w-full bg-transparent border-none focus:ring-0 text-[#e5e2e1] text-lg resize-none px-4 py-3 placeholder-[#8e9196]/50"
                   rows={2}
                 />
                 <div className="flex items-center justify-between px-3 py-2 border-t border-[#43474c]/30 mt-2">
                   <div className="flex gap-2">
-                    <button className="p-2 hover:bg-[#2a2a2a] rounded text-[#8e9196] transition-colors">
-                      📎
-                    </button>
-                    <button className="p-2 hover:bg-[#2a2a2a] rounded text-[#8e9196] transition-colors">
-                      🖼️
-                    </button>
-                    <button className="p-2 hover:bg-[#2a2a2a] rounded text-[#8e9196] transition-colors">
-                      &lt;/&gt;
-                    </button>
                   </div>
                   <Button
                     onClick={submitAnswer}
                     disabled={!answer.trim() || loading}
-                    className="bg-[#b8c8da] text-[#0d1d2a] hover:brightness-110 px-4 py-1 text-xs font-bold rounded-lg transition-all"
+                    className="bg-[#b8c8da] text-[#0d1d2a] hover:brightness-110 px-4 py-1 text-base font-bold rounded-lg transition-all"
                   >
                     {loading ? "Submitting..." : "SEND →"}
                   </Button>
                   <Button
                     onClick={generateFinalSummary}
                     disabled={loading || questionCount === 0}
-                    className="bg-[#2a2a2a] text-[#e5e2e1] hover:bg-[#43474c] px-4 py-1 text-xs font-bold rounded-lg border border-[#43474c]"
+                    className="bg-[#2a2a2a] text-[#e5e2e1] hover:bg-[#43474c] px-4 py-1 text-base font-bold rounded-lg border border-[#43474c]"
                   >
                     Final Summary
                   </Button>
@@ -472,7 +513,7 @@ export default function Interview() {
               </div>
             )}
           </div>
-          <p className="text-center text-[10px] text-[#8e9196]/40 mt-3 uppercase tracking-widest">
+          <p className="text-center text-sm text-[#8e9196]/40 mt-3 uppercase tracking-widest">
             Encrypted Session • Real-time AI Assessment
           </p>
         </div>
@@ -481,15 +522,15 @@ export default function Interview() {
       {/* Right Sidebar - Metrics */}
       <aside className="hidden xl:flex flex-col w-80 bg-[#1c1b1b] border-l border-[#43474c] p-6 gap-6">
         <div className="space-y-2">
-          <h3 className="text-xs text-[#8e9196] uppercase tracking-widest font-bold">
+          <h3 className="text-base text-[#8e9196] uppercase tracking-widest font-bold">
             Live Assessment Profile
           </h3>
 
           <div className="bg-[#131313] p-4 rounded-xl border border-[#43474c] space-y-4">
             <div>
               <div className="flex justify-between items-end mb-2">
-                <span className="text-xs text-[#8e9196]">Conceptual Understanding</span>
-                <span className="text-lg text-[#b8c8da] font-bold">{metrics.conceptualUnderstanding}%</span>
+                <span className="text-base text-[#8e9196]">Conceptual Understanding</span>
+                <span className="text-2xl text-[#b8c8da] font-bold">{metrics.conceptualUnderstanding}%</span>
               </div>
               <div className="w-full h-1 bg-[#2a2a2a] rounded-full overflow-hidden">
                 <div
@@ -501,8 +542,8 @@ export default function Interview() {
 
             <div>
               <div className="flex justify-between items-end mb-2">
-                <span className="text-xs text-[#8e9196]">Communication Clarity</span>
-                <span className="text-lg text-[#b8c8da] font-bold">{metrics.communicationClarity}%</span>
+                <span className="text-base text-[#8e9196]">Communication Clarity</span>
+                <span className="text-2xl text-[#b8c8da] font-bold">{metrics.communicationClarity}%</span>
               </div>
               <div className="w-full h-1 bg-[#2a2a2a] rounded-full overflow-hidden">
                 <div
@@ -515,22 +556,22 @@ export default function Interview() {
         </div>
 
         <div className="space-y-2 min-h-0">
-          <h3 className="text-xs text-[#8e9196] uppercase tracking-widest font-bold">
+          <h3 className="text-base text-[#8e9196] uppercase tracking-widest font-bold">
             RAG Evidence
           </h3>
           <div className="bg-[#131313] border border-[#43474c] rounded-xl p-4 space-y-3 max-h-[420px] overflow-y-auto">
             <div>
-              <p className="text-[10px] uppercase tracking-widest text-[#8e9196] mb-1">
+              <p className="text-sm uppercase tracking-widest text-[#8e9196] mb-1">
                 Generated Query
               </p>
-              <p className="text-xs text-[#c4c7cc]">
+              <p className="text-base text-[#c4c7cc]">
                 {retrieval.query || "No retrieval query yet."}
               </p>
             </div>
             {(retrieval.chunks ?? []).map((chunk, idx) => (
               <div
                 key={`${chunk.metadata?.source ?? "chunk"}-${idx}`}
-                className="border-t border-[#43474c]/50 pt-3 text-xs text-[#c4c7cc] space-y-2"
+                className="border-t border-[#43474c]/50 pt-3 text-base text-[#c4c7cc] space-y-2"
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-bold text-[#b8c8da] truncate">
@@ -549,15 +590,6 @@ export default function Interview() {
           </div>
         </div>
 
-        <div className="mt-auto bg-[#131313] p-4 rounded-xl border border-dashed border-[#43474c]">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-[#b8c8da] text-sm">💡</span>
-            <span className="text-xs text-[#b8c8da] font-bold">Interviewer Tip</span>
-          </div>
-          <p className="text-xs text-[#8e9196]">
-            Candidate mentioned Redis caching. Ask about invalidation logic for embeddings.
-          </p>
-        </div>
       </aside>
     </div>
   );

@@ -91,8 +91,11 @@ def parse_resume(content: bytes) -> Dict:
         domains = extract_terms_by_vocab(normalized, DOMAIN_KEYWORDS)
         project_technologies = extract_project_technologies(sections)
 
+        # Merge section-specific skills with global technologies for a more robust result
+        unified_skills = sorted(set(skills + technologies))[:30]
+
         return {
-            "skills": sorted(set(skills))[:20],
+            "skills": unified_skills,
             "frameworks": sorted(set(frameworks))[:20],
             "technologies": sorted(set(technologies))[:30],
             "domains": sorted(set(domains))[:10],
